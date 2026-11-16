@@ -175,6 +175,7 @@ def edit(profile):
     status = "configured; Enter to keep" if profile.get("key") else "leave blank for a local endpoint without auth"
     key = getpass.getpass(f"API key ({status}): ")
     updated = {
+        "display_name": profile.get("display_name", ""),
         "base": base, "key": profile.get("key", "") if not key else "" if key == "-" else key,
         "enabled": profile.get("enabled", True), "manual": profile.get("manual", []),
         "default_model": profile.get("default_model", ""), "small_model": profile.get("small_model", ""),
@@ -225,11 +226,15 @@ def test_catalog(profile):
         return False
 
 
+def provider_label(name, profile):
+    return profile.get("display_name") or {"litellm": "LiteLLM", "commandcode": "CommandCode"}.get(name, name)
+
+
 def manage(add_first=False):
     while True:
         providers = load(CONFIG)
-        name = "" if add_first else choose("Manage providers", [("Add provider", "")] + [
-            (name + ("" if profile["enabled"] else " (disabled)"), name)
+        name = "" if add_first else choose("Manage Providers", [("Add Provider", "")] + [
+            (provider_label(name, profile) + ("" if profile["enabled"] else " (disabled)"), name)
             for name, profile in sorted(providers.items())
         ], searchable=len(providers) > 8)
         add_first = False
@@ -237,18 +242,23 @@ def manage(add_first=False):
             return
         try:
             if not name:
-                name = input("Provider name: ").strip().lower()
+                label = input("Provider name: ").strip()
+                name = label.lower()
                 if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name) or name in providers or name == "native":
                     raise ValueError("Choose a unique provider name using letters, digits, or hyphens.")
                 updated = edit({})
                 if updated is None:
                     continue
-                providers[name] = updated
+                providers[name] = updated | {"display_name": label}
             else:
                 profile = providers[name]
-                action = choose(name, [(item, item) for item in (
-                    "Edit URL or key", "Advanced settings", "Test catalog", "Disable" if profile["enabled"] else "Enable", "Delete"
-                )])
+                title = f"Provider: {provider_label(name, profile)}"
+                action = choose(title, [("Edit", "Edit"), ("Delete", "Delete")])
+                if action == "Edit":
+                    action = choose(f"Edit {provider_label(name, profile)}", [(item, item) for item in (
+                        "Edit URL or key", "Advanced settings", "Test catalog",
+                        "Disable" if profile["enabled"] else "Enable",
+                    )])
                 if action == "Test catalog":
                     test_catalog(profile)
                     continue
@@ -442,13 +452,24 @@ def main():
         if mode in COMMANDS and mode not in available:
             raise ValueError(f"{HARNESS_NAMES[mode]} is unavailable. Install it or add {COMMANDS[mode]} to PATH.")
         if not mode:
-            launch_options = [(f"Launch {label}", harness) for harness, label in HARNESS_NAMES.items()
-                              if harness in available]
-            if not launch_options:
-                print("No supported harnesses found on PATH.")
-            mode = choose("Provider Picker", launch_options + [
-                ("Add provider", "add"), ("Manage providers", "providers"), ("Help", "help"),
-            ])
+            while True:
+                providers = load(CONFIG)
+                options = [("Manage providers", ("providers", None))]
+                for harness, label, native in (("claude", "Claude", "Anthropic"), ("codex", "Codex", "OpenAI")):
+                    if harness not in available:
+                        continue
+                    options.append((f"Launch {label} (via {native})", (harness, "native")))
+                    options.extend((f"Launch {label} (via {provider_label(name, profile)})", (harness, name))
+                                   for name, profile in sorted(providers.items())
+                                   if profile["enabled"] and profile[harness])
+                selection = choose("Welcome to Provider Picker", options, searchable=len(options) > 8)
+                if selection is None:
+                    return
+                harness, provider = selection
+                if harness == "providers":
+                    manage()
+                else:
+                    return launch(harness, provider, args.model, providers, passthrough)
         if mode == "help":
             parser.print_help()
         elif mode in ("add", "providers"):
