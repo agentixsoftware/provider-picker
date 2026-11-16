@@ -40,3 +40,13 @@ If catalog refresh fails, the picker uses the last successful result and labels 
 ## Uninstall
 
 Run `pipx uninstall provider-picker`. The native harness commands use their original homes and settings. For a full purge, review and delete `${XDG_CONFIG_HOME:-$HOME/.config}/provider-picker`. That directory contains the local provider config, cache, API keys, and isolated harness data, including any custom-provider session history. Its config files are owner-readable and writable, and keys are stored in plaintext there. Keep the directory out of source control and backups that you share.
+
+## Migrate from local-claude
+
+Run `provider-picker import-local-claude` to import the profiles from
+`~/.claude-local/providers`. Pass `--directory PATH` for a different location.
+The import preserves enabled and disabled entries, default and background
+models, and catalog settings. It reads simple shell assignments as data and
+stops if a provider name is already in use. Try a custom launch before retiring
+the old launcher. Archive the old Claude profile separately if you need its
+session history.

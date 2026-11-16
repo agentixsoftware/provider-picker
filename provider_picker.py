@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import sys
 import tempfile
 from urllib.parse import urlsplit
@@ -68,7 +69,9 @@ def catalog(profile):
     if not isinstance(rows, list):
         raise ValueError("Expected a list or a JSON object with a data list.")
     models = [row.get("id") if isinstance(row, dict) else row for row in rows]
-    return sorted({model for model in models if isinstance(model, str) and model.isprintable() and model.strip()})
+    prefix = profile.get("catalog_prefix", "")
+    return sorted({model for model in models if isinstance(model, str) and model.isprintable()
+                   and model.strip() and model.startswith(prefix)})
 
 
 def prompt(label, current="", help_text=""):
@@ -108,6 +111,8 @@ def edit(profile):
                                     "Optional. Leave blank to derive the models URL from the base URL.")
     if updated["catalog_url"]:
         checked_url(updated["catalog_url"])
+    updated["catalog_prefix"] = prompt("Catalog model ID prefix", profile.get("catalog_prefix", ""),
+                                       "Optional. Show only live model IDs beginning with this prefix.")
     updated["catalog_auth"] = prompt("Catalog authentication (bearer, anthropic, none)",
                                      profile.get("catalog_auth", "bearer"))
     if updated["catalog_auth"] not in {"bearer", "anthropic", "none"}:
@@ -123,6 +128,10 @@ def edit(profile):
         raise ValueError("Choose key or bearer.")
     updated["manual"] = prompt("Manual model IDs, comma separated", ",".join(profile.get("manual", [])))
     updated["manual"] = [value.strip() for value in updated["manual"].split(",") if value.strip()]
+    updated["default_model"] = prompt("Default model ID", profile.get("default_model", ""),
+                                      "Optional. Used when launching with --provider and no --model.")
+    updated["small_model"] = prompt("Claude background model", profile.get("small_model", ""),
+                                    "Optional. Leave blank to use the selected model.")
     key_status = "configured" if profile.get("key") else "empty"
     key = getpass.getpass(f"API key ({key_status}; Enter to keep, - to clear): ")
     updated["key"] = profile.get("key", "") if not key else "" if key == "-" else key
@@ -208,8 +217,11 @@ def select_model(harness, providers):
             live = cache.get(name, [])
             status = " (cached)"
             print(f"{name}: catalog unavailable ({error}). Check settings in Manage providers.", file=sys.stderr)
-        for model in sorted(set(profile["manual"]) | set(live)):
-            options.append((f"{model} — {name}" + (status if model not in profile["manual"] else ""), (name, model)))
+        models = set(profile["manual"]) | set(live)
+        if profile.get("default_model"):
+            models.add(profile["default_model"])
+        for model in sorted(models):
+            options.append((f"{model} — {name}" + (status if model in live and model not in profile["manual"] else ""), (name, model)))
         options.append((f"Enter a model ID — {name}", (name, None)))
     if cache:
         save(CACHE, cache)
@@ -224,6 +236,7 @@ def launch(harness, name, model, providers, passthrough):
         if not profile or not profile["enabled"] or not profile[harness]:
             raise ValueError(f"Provider {name!r} has no enabled {harness} route.")
         base = profile["base"] if profile[harness] == "=" else profile[harness]
+        model = model or profile.get("default_model")
         if not model:
             raise ValueError("Supply a model ID with --model.")
         if harness == "claude":
@@ -236,6 +249,9 @@ def launch(harness, name, model, providers, passthrough):
                 env[key_var] = profile["key"]
             for var in ("MODEL", "DEFAULT_OPUS_MODEL", "DEFAULT_SONNET_MODEL", "DEFAULT_HAIKU_MODEL", "SMALL_FAST_MODEL"):
                 env[f"ANTHROPIC_{var}"] = model
+            if profile.get("small_model"):
+                env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = profile["small_model"]
+                env["ANTHROPIC_SMALL_FAST_MODEL"] = profile["small_model"]
         else:
             env["CODEX_HOME"] = str(ROOT / "codex" / name)
             Path(env["CODEX_HOME"]).mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -250,9 +266,60 @@ def launch(harness, name, model, providers, passthrough):
     os.execvpe(args[0], args + passthrough, env)
 
 
+def import_local_claude(directory):
+    paths = sorted((*directory.glob("*.env"), *directory.glob("*.env.disabled")))
+    if not paths:
+        raise ValueError("No .env or .env.disabled profiles found in the specified directory.")
+    providers = load(CONFIG)
+    imports = {}
+    for path in paths:
+        stem = path.name.removesuffix(".disabled").removesuffix(".env")
+        name = re.sub(r"^\d{2}-", "", stem)
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name) or name == "native":
+            raise ValueError(f"Unsupported provider name in {path.name}.")
+        if name in providers or name in imports:
+            raise ValueError(f"Provider {name!r} already exists. Import stopped without changes.")
+        values = {}
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            try:
+                tokens = shlex.split(stripped, comments=True)
+                if tokens and tokens[0] == "export":
+                    tokens.pop(0)
+                if len(tokens) != 1 or not re.fullmatch(r"ALT_[A-Z_]+=.*", tokens[0]):
+                    raise ValueError
+                key, value = tokens[0].split("=", 1)
+                values[key] = value
+            except ValueError:
+                raise ValueError(f"Unsupported assignment in {path.name}, line {number}.") from None
+        base = checked_url(values.get("ALT_BASE_URL", ""))
+        catalog_url = values.get("ALT_MODELS_URL", "")
+        if catalog_url:
+            checked_url(catalog_url)
+        imports[name] = {
+            "base": base,
+            "catalog_url": catalog_url,
+            "catalog_auth": "bearer",
+            "catalog_prefix": values.get("ALT_MODELS_PREFIX", ""),
+            "claude": "=",
+            "claude_auth": "bearer" if values.get("ALT_AUTH_STYLE") == "bearer" else "key",
+            "codex": "",
+            "default_model": values.get("ALT_MODEL", ""),
+            "small_model": values.get("ALT_SMALL_MODEL", ""),
+            "key": values.get("ALT_API_KEY", ""),
+            "manual": re.split(r"[\s,]+", values.get("ALT_MODELS", "").strip()) if values.get("ALT_MODELS", "").strip() else [],
+            "enabled": not path.name.endswith(".disabled"),
+        }
+    save(CONFIG, providers | imports)
+    print("Imported providers: " + ", ".join(imports))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, epilog="Run without arguments for the menu. Put harness arguments after --.")
-    parser.add_argument("mode", nargs="?", choices=(*COMMANDS, "providers", "help"))
+    parser.add_argument("mode", nargs="?", choices=(*COMMANDS, "providers", "import-local-claude", "help"))
+    parser.add_argument("--directory", type=Path, help="Legacy provider directory for import-local-claude")
     parser.add_argument("--provider", help="Saved provider name, or native")
     parser.add_argument("--model", help="Exact model ID to launch")
     cli, separator, passthrough = sys.argv[1:], "--", []
@@ -271,6 +338,8 @@ def main():
             parser.print_help()
         elif mode == "providers":
             manage()
+        elif mode == "import-local-claude":
+            import_local_claude(args.directory or Path.home() / ".claude-local" / "providers")
         elif mode:
             providers = load(CONFIG)
             if args.provider or args.model:
