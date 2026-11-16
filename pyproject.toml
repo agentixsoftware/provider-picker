@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "provider-picker"
+version = "0.1.0"
+requires-python = ">=3.10"
+description = "Choose a provider and model for Claude Code or Codex"
+
+[project.scripts]
+provider-picker = "provider_picker:main"
+
+[tool.setuptools]
+py-modules = ["provider_picker"]
