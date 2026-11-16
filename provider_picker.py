@@ -332,7 +332,15 @@ def launch(harness, name, model, providers, passthrough):
         if harness == "claude":
             env["CLAUDE_CONFIG_DIR"] = str(ROOT / "claude" / name)
             env["ANTHROPIC_BASE_URL"] = base.rstrip("/")
-            settings = Path(env["CLAUDE_CONFIG_DIR"]) / "provider-picker-settings.json"
+            env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+            home = Path(env["CLAUDE_CONFIG_DIR"])
+            if profile["key"]:
+                onboarding = home / ".claude.json"
+                state = load(onboarding)
+                if not state.get("hasCompletedOnboarding"):
+                    state["hasCompletedOnboarding"] = True
+                    save(onboarding, state)
+            settings = home / "provider-picker-settings.json"
             save(settings, {"modelPicker": {
                 "replaceBuiltInOptions": True,
                 "options": [{"model": item, "label": item, "description": f"Served by {name}"}
@@ -342,7 +350,10 @@ def launch(harness, name, model, providers, passthrough):
             env.pop("ANTHROPIC_API_KEY", None)
             env.pop("ANTHROPIC_AUTH_TOKEN", None)
             if profile["key"]:
-                key_var = "ANTHROPIC_AUTH_TOKEN" if profile["claude_auth"] == "bearer" else "ANTHROPIC_API_KEY"
+                bearer = profile["claude_auth"] == "bearer" or (
+                    profile.get("auto_catalog") and urlsplit(base).hostname == "api.commandcode.ai"
+                )
+                key_var = "ANTHROPIC_AUTH_TOKEN" if bearer else "ANTHROPIC_API_KEY"
                 env[key_var] = profile["key"]
             for var in ("MODEL", "DEFAULT_OPUS_MODEL", "DEFAULT_SONNET_MODEL", "DEFAULT_HAIKU_MODEL", "SMALL_FAST_MODEL"):
                 env[f"ANTHROPIC_{var}"] = model
