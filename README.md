@@ -16,11 +16,10 @@ If the command is missing after installation, run `pipx ensurepath` and reopen y
 ## Add or change a provider
 
 1. Run `provider-picker` and select **Manage providers → Add provider**.
-2. Enter the provider's API base and key. For an OpenAI-style base ending in `/v1`, the default catalog is `<base>/models` with bearer authentication. Supply a catalog URL if the provider uses another endpoint. For an Anthropic catalog, select `anthropic` authentication.
-3. Fill in the API base for each supported harness. Enter `=` to reuse the provider base, or leave the route blank. Claude Code needs Anthropic Messages. Codex needs OpenAI Responses. Use the base documented for the client, without the final `/messages` or `/responses` segment. Claude Code normally appends `/v1/messages`; Codex appends `/responses` to its base.
-4. Test the catalog, review the returned model IDs, and save. If the provider has no catalog endpoint, supply comma-separated model IDs or enter a model ID at launch.
+2. Enter the provider name, API base URL, and API key. Leave the key blank for a local server that needs no authentication.
+3. The picker checks the standard `/models` and `/v1/models` paths using bearer or Anthropic authentication and previews the result.
 
-To rotate a key or change a URL, select the provider and choose **Edit**. Press Enter to keep the displayed value or the existing key. Type `-` to clear an optional field or key. The menu also lets you test the catalog, disable a provider temporarily, or delete it.
+Select **Edit URL or key** to rotate a key or change the base URL. Press Enter to keep an existing value or key, or type `-` to clear the key. Use **Advanced settings** for a separate catalog address, manual model IDs, or providers whose Anthropic Messages and OpenAI Responses endpoints use different bases or authentication.
 
 ## Launch a harness
 
@@ -31,11 +30,11 @@ provider-picker codex --provider my-gateway --model model-id
 provider-picker claude --provider native -- --help
 ```
 
-Type part of a provider or model name to search, or choose a numbered row. The native option opens the harness using its existing sign-in and model picker. Claude Code also has native Opus, Sonnet, and Haiku shortcuts. Custom routes use a separate harness home for each provider and select the requested model at startup.
+Choose a provider at launch, then choose a model in the harness with `/model`. Native opens the harness with its usual sign-in and models. A custom session shows the active provider's catalog. Start another session to switch providers, or configure one gateway that routes all of your models. Claude Code requires version 2.1.242 or newer for generated model-picker entries.
 
-A catalog hit means the API listed the model. Verify tool use and streaming in the harness before relying on a new model. To use Claude models in Codex, configure a Responses route that serves those models. To use GPT models in Claude Code, configure a Messages route that serves them. This launcher does not translate between protocols or change the harness's in-session model picker.
+Claude Code needs an Anthropic Messages route. Codex needs an OpenAI Responses route. Discovering a model does not verify that the route serves it for that harness. Claude Code handles effort controls for models it recognizes. Generic catalog entries do not declare reasoning levels, so the generated Codex catalog leaves those levels unspecified.
 
-If catalog refresh fails, the picker uses the last successful result and labels cached rows. Check the provider URL, auth mode, and key in **Manage providers**. Redirects are rejected so credentials are never forwarded to a redirected catalog endpoint. Use the final URL instead.
+If catalog refresh fails, the picker uses the last successful result. Check the URL and key in **Manage providers**. Redirects are rejected so credentials are never sent to a redirected catalog endpoint.
 
 ## Uninstall
 

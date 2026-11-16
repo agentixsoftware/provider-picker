@@ -25,8 +25,8 @@ def load(path):
 
 
 def save(path, data):
-    ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with tempfile.NamedTemporaryFile(mode="w", dir=ROOT, delete=False) as file:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as file:
         temp = Path(file.name)
         try:
             json.dump(data, file, indent=2)
@@ -102,7 +102,7 @@ def choose(title, options, searchable=False):
             print("Choose a number from the menu.")
 
 
-def edit(profile):
+def edit_advanced(profile):
     updated = dict(profile)
     print("Press Enter to keep a value, or type - to clear an optional field.")
     updated["base"] = checked_url(prompt("Base URL", profile.get("base", ""),
@@ -143,9 +143,53 @@ def edit(profile):
     return updated
 
 
+def edit(profile):
+    base = checked_url(prompt("Base URL", profile.get("base", ""),
+                              "Use the API base URL shown in your provider's documentation.")).rstrip("/")
+    status = "configured; Enter to keep" if profile.get("key") else "leave blank for a local endpoint without auth"
+    key = getpass.getpass(f"API key ({status}): ")
+    updated = {
+        "base": base, "key": profile.get("key", "") if not key else "" if key == "-" else key,
+        "enabled": profile.get("enabled", True), "manual": profile.get("manual", []),
+        "default_model": profile.get("default_model", ""), "small_model": profile.get("small_model", ""),
+        "catalog_prefix": profile.get("catalog_prefix", ""),
+    }
+    if profile and not profile.get("auto_catalog"):
+        updated = profile | updated
+    else:
+        root = base.removesuffix("/v1")
+        versioned = root + "/v1"
+        updated.update(claude=root, codex=versioned, claude_auth="key",
+                       catalog_url="", catalog_auth="bearer", auto_catalog=True)
+    test_catalog(updated)
+    return updated
+
+
+def read_catalog(profile):
+    if not profile.get("auto_catalog"):
+        return catalog(profile)
+    base = profile["base"]
+    endpoints = dict.fromkeys((base + "/models", base.removesuffix("/v1") + "/v1/models"))
+    first_error = None
+    succeeded = False
+    for url in endpoints:
+        for method in ("bearer", "anthropic"):
+            try:
+                models = catalog(profile | {"catalog_url": url, "catalog_auth": method})
+                succeeded = True
+                if models:
+                    return models
+            except (OSError, ValueError) as error:
+                if first_error is None:
+                    first_error = error
+    if first_error and not succeeded:
+        raise first_error
+    return []
+
+
 def test_catalog(profile):
     try:
-        models = catalog(profile)
+        models = read_catalog(profile)
         print(f"Catalog returned {len(models)} model(s).")
         for model in models[:8]:
             print(f"  {model}")
@@ -174,13 +218,16 @@ def manage():
             else:
                 profile = providers[name]
                 action = choose(name, [(item, item) for item in (
-                    "Edit", "Test catalog", "Disable" if profile["enabled"] else "Enable", "Delete"
+                    "Edit URL or key", "Advanced settings", "Test catalog", "Disable" if profile["enabled"] else "Enable", "Delete"
                 )])
                 if action == "Test catalog":
                     test_catalog(profile)
                     continue
-                if action == "Edit":
-                    updated = edit(profile)
+                if action in ("Edit URL or key", "Advanced settings"):
+                    if action == "Advanced settings":
+                        updated = edit_advanced(profile | {"advanced": True, "auto_catalog": False})
+                    else:
+                        updated = edit(profile)
                     if updated is None:
                         continue
                     providers[name] = updated
@@ -200,32 +247,42 @@ def manage():
             print(f"Could not save provider: {error}")
 
 
-def select_model(harness, providers):
-    options = [(f"Native {harness} — open with your normal account and model picker", ("native", None))]
-    if harness == "claude":
-        options.extend((f"{model.title()} — native Claude Code", ("native", model))
-                       for model in ("opus", "sonnet", "haiku"))
+def select_provider(harness, providers):
+    options = [(f"Native {harness} — use your normal account", "native")]
+    options.extend((name, name) for name, profile in providers.items()
+                   if profile["enabled"] and profile[harness])
+    return choose(f"Select a provider for {harness} (choose models in /model)", options, searchable=True)
+
+
+def provider_models(name, profile):
     cache = load(CACHE)
-    for name, profile in providers.items():
-        if not profile["enabled"] or not profile[harness]:
-            continue
-        try:
-            live = catalog(profile)
+    try:
+        live = read_catalog(profile)
+        if live:
             cache[name] = live
-            status = ""
-        except (OSError, ValueError) as error:
-            live = cache.get(name, [])
-            status = " (cached)"
-            print(f"{name}: catalog unavailable ({error}). Check settings in Manage providers.", file=sys.stderr)
-        models = set(profile["manual"]) | set(live)
-        if profile.get("default_model"):
-            models.add(profile["default_model"])
-        for model in sorted(models):
-            options.append((f"{model} — {name}" + (status if model in live and model not in profile["manual"] else ""), (name, model)))
-        options.append((f"Enter a model ID — {name}", (name, None)))
-    if cache:
-        save(CACHE, cache)
-    return choose(f"Select a model for {harness}", options, searchable=True)
+            save(CACHE, cache)
+    except (OSError, ValueError) as error:
+        live = cache.get(name, [])
+        fallback = " Using last successful catalog." if live else ""
+        print(f"{name}: catalog unavailable ({error}).{fallback}", file=sys.stderr)
+    return sorted(set(live) | set(profile["manual"]))
+
+
+def codex_catalog(name, models):
+    rows = []
+    for priority, model in enumerate(models):
+        rows.append(dict(
+            slug=model, display_name=model, description=f"Served by {name}", priority=priority,
+            shell_type="shell_command", visibility="list", supported_in_api=True,
+            default_reasoning_level=None, supported_reasoning_levels=[],
+            base_instructions="You are a coding assistant. Work with the user to complete their task.",
+            supports_reasoning_summaries=False, support_verbosity=False,
+            apply_patch_tool_type="freeform", truncation_policy={"mode": "bytes", "limit": 10000},
+            supports_parallel_tool_calls=False,
+        ))
+    path = ROOT / "codex" / name / "catalog.json"
+    save(path, {"models": rows})
+    return path
 
 
 def launch(harness, name, model, providers, passthrough):
@@ -236,12 +293,21 @@ def launch(harness, name, model, providers, passthrough):
         if not profile or not profile["enabled"] or not profile[harness]:
             raise ValueError(f"Provider {name!r} has no enabled {harness} route.")
         base = profile["base"] if profile[harness] == "=" else profile[harness]
-        model = model or profile.get("default_model")
+        models = provider_models(name, profile)
+        model = model or profile.get("default_model") or next(iter(models), None)
         if not model:
-            raise ValueError("Supply a model ID with --model.")
+            raise ValueError("No models found. Check the provider catalog or supply --model MODEL_ID.")
+        models = sorted(set(models) | {model})
         if harness == "claude":
             env["CLAUDE_CONFIG_DIR"] = str(ROOT / "claude" / name)
             env["ANTHROPIC_BASE_URL"] = base.rstrip("/")
+            settings = Path(env["CLAUDE_CONFIG_DIR"]) / "provider-picker-settings.json"
+            save(settings, {"modelPicker": {
+                "replaceBuiltInOptions": True,
+                "options": [{"model": item, "label": item, "description": f"Served by {name}"}
+                            for item in models],
+            }})
+            args.extend(["--settings", str(settings)])
             env.pop("ANTHROPIC_API_KEY", None)
             env.pop("ANTHROPIC_AUTH_TOKEN", None)
             if profile["key"]:
@@ -254,7 +320,8 @@ def launch(harness, name, model, providers, passthrough):
                 env["ANTHROPIC_SMALL_FAST_MODEL"] = profile["small_model"]
         else:
             env["CODEX_HOME"] = str(ROOT / "codex" / name)
-            Path(env["CODEX_HOME"]).mkdir(parents=True, exist_ok=True, mode=0o700)
+            path = codex_catalog(name, models)
+            args.extend(["-c", f"model_catalog_json={json.dumps(str(path), ensure_ascii=False)}"])
             args.extend(["-c", 'model_provider="picker"', "-c", 'model_providers.picker.name="Provider Picker"',
                          "-c", f"model_providers.picker.base_url={json.dumps(base.rstrip('/'), ensure_ascii=False)}",
                          "-c", 'model_providers.picker.wire_api="responses"'])
@@ -345,9 +412,8 @@ def main():
             if args.provider or args.model:
                 selection = (args.provider or "native", args.model)
             else:
-                selection = select_model(mode, providers)
-                if selection and selection[0] != "native" and selection[1] is None:
-                    selection = (selection[0], input("Exact model ID: ").strip())
+                name = select_provider(mode, providers)
+                selection = (name, None) if name is not None else None
             if selection:
                 launch(mode, *selection, providers, passthrough)
     except (KeyboardInterrupt, EOFError):
