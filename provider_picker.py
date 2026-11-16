@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import sys
 import tempfile
 from urllib.parse import urlsplit
@@ -15,6 +16,7 @@ ROOT = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "pro
 CONFIG = ROOT / "providers.json"
 CACHE = ROOT / "catalogs.json"
 COMMANDS = {"claude": "claude", "codex": "codex"}
+HARNESS_NAMES = {"claude": "Claude Code", "codex": "Codex"}
 
 
 def load(path):
@@ -425,9 +427,15 @@ def main():
     args = parser.parse_args(cli)
     try:
         mode = args.mode
+        available = {harness for harness, command in COMMANDS.items() if shutil.which(command)}
+        if mode in COMMANDS and mode not in available:
+            raise ValueError(f"{HARNESS_NAMES[mode]} is unavailable. Install it or add {COMMANDS[mode]} to PATH.")
         if not mode:
-            mode = choose("Provider Picker", [
-                ("Launch Claude Code", "claude"), ("Launch Codex", "codex"),
+            launch_options = [(f"Launch {label}", harness) for harness, label in HARNESS_NAMES.items()
+                              if harness in available]
+            if not launch_options:
+                print("No supported harnesses found on PATH.")
+            mode = choose("Provider Picker", launch_options + [
                 ("Add provider", "add"), ("Manage providers", "providers"), ("Help", "help"),
             ])
         if mode == "help":

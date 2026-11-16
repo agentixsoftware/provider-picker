@@ -30,7 +30,7 @@ provider-picker codex --provider my-gateway --model model-id
 provider-picker claude --provider native -- --help
 ```
 
-Choose a provider at launch, then choose a model in the harness with `/model`. Native opens the harness with its usual sign-in and models. A custom session shows the active provider's catalog. Start another session to switch providers, or configure one gateway that routes all of your models. Claude Code requires version 2.1.242 or newer for generated model-picker entries.
+The main menu shows the harnesses available on your PATH. Choose a provider at launch, then choose a model in the harness with `/model`. Native opens the harness with its usual sign-in and models. A custom session shows the active provider's catalog. Start another session to switch providers, or configure one gateway that routes all of your models. Claude Code requires version 2.1.242 or newer for generated model-picker entries.
 
 Claude Code needs an Anthropic Messages route. Codex needs an OpenAI Responses route. Discovering a model does not verify that the route serves it for that harness. Claude Code handles effort controls for models it recognizes. Generic catalog entries do not declare reasoning levels, so the generated Codex catalog leaves those levels unspecified.
 
