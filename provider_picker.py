@@ -48,14 +48,24 @@ def checked_url(value):
     return value
 
 
-def catalog(profile):
+def normalize_base(value):
+    parsed = urlsplit(checked_url(value))
+    path = parsed.path.rstrip("/")
+    for suffix in ("/chat/completions", "/responses", "/messages", "/models"):
+        if path.endswith(suffix):
+            path = path.removesuffix(suffix)
+            break
+    return parsed._replace(path=path).geturl()
+
+
+def catalog(profile, harness=None):
     base = profile["base"]
     protocol = profile["catalog_auth"]
     url = profile["catalog_url"] or (
         base.rstrip("/") + ("/v1/models" if protocol == "anthropic" and not base.rstrip("/").endswith("/v1") else "/models")
     )
     key = profile["key"]
-    headers = {"Accept": "application/json"}
+    headers = {"Accept": "application/json", "User-Agent": "provider-picker/0.1"}
     if protocol == "anthropic":
         headers["anthropic-version"] = "2023-06-01"
         if key:
@@ -68,7 +78,19 @@ def catalog(profile):
     rows = payload.get("data") if isinstance(payload, dict) else payload
     if not isinstance(rows, list):
         raise ValueError("Expected a list or a JSON object with a data list.")
-    models = [row.get("id") if isinstance(row, dict) else row for row in rows]
+    endpoint = {"claude": "messages", "codex": "responses"}.get(harness)
+    models = []
+    for row in rows:
+        if isinstance(row, dict):
+            advertised = row.get("supported_endpoints")
+            if endpoint and isinstance(advertised, list) and not any(
+                isinstance(route, str) and route.rstrip("/").split("/")[-1] == endpoint
+                for route in advertised
+            ):
+                continue
+            models.append(row.get("id"))
+        else:
+            models.append(row)
     prefix = profile.get("catalog_prefix", "")
     return sorted({model for model in models if isinstance(model, str) and model.isprintable()
                    and model.strip() and model.startswith(prefix)})
@@ -89,8 +111,8 @@ def choose(title, options, searchable=False):
             print(f"  {number:2}. {label}")
         if len(visible) > 30:
             print(f"  Showing 30 of {len(visible)}. Search to narrow the list.")
-        reply = input("Number or search (Enter to go back, / to reset): " if searchable
-                      else "Number (Enter to go back): ").strip()
+        reply = input("Choose or search (Enter to go back): " if searchable
+                      else "Choose (Enter to go back): ").strip()
         if not reply:
             return None
         if reply.isdecimal() and 1 <= int(reply) <= min(30, len(visible)):
@@ -144,8 +166,10 @@ def edit_advanced(profile):
 
 
 def edit(profile):
-    base = checked_url(prompt("Base URL", profile.get("base", ""),
-                              "Use the API base URL shown in your provider's documentation.")).rstrip("/")
+    entered = prompt("Base URL", profile.get("base", ""))
+    base = normalize_base(entered)
+    if base != entered.rstrip("/"):
+        print(f"Using API base {base}")
     status = "configured; Enter to keep" if profile.get("key") else "leave blank for a local endpoint without auth"
     key = getpass.getpass(f"API key ({status}): ")
     updated = {
@@ -161,13 +185,15 @@ def edit(profile):
         versioned = root + "/v1"
         updated.update(claude=root, codex=versioned, claude_auth="key",
                        catalog_url="", catalog_auth="bearer", auto_catalog=True)
-    test_catalog(updated)
+    if not test_catalog(updated):
+        print("Changes weren’t saved. Check the URL or key and try again.")
+        return None
     return updated
 
 
-def read_catalog(profile):
+def read_catalog(profile, harness=None):
     if not profile.get("auto_catalog"):
-        return catalog(profile)
+        return catalog(profile, harness)
     base = profile["base"]
     endpoints = dict.fromkeys((base + "/models", base.removesuffix("/v1") + "/v1/models"))
     first_error = None
@@ -175,7 +201,7 @@ def read_catalog(profile):
     for url in endpoints:
         for method in ("bearer", "anthropic"):
             try:
-                models = catalog(profile | {"catalog_url": url, "catalog_auth": method})
+                models = catalog(profile | {"catalog_url": url, "catalog_auth": method}, harness)
                 succeeded = True
                 if models:
                     return models
@@ -190,25 +216,26 @@ def read_catalog(profile):
 def test_catalog(profile):
     try:
         models = read_catalog(profile)
-        print(f"Catalog returned {len(models)} model(s).")
-        for model in models[:8]:
-            print(f"  {model}")
+        print(f"Catalog reachable · {len(models)} models found.")
+        return True
     except (OSError, ValueError) as error:
-        print(f"Catalog test failed: {error}. Check the URL, auth method, and key.")
+        print(f"Catalog unavailable ({error}).")
+        return False
 
 
-def manage():
+def manage(add_first=False):
     while True:
         providers = load(CONFIG)
-        name = choose("Manage providers", [("Add provider", "")] + [
+        name = "" if add_first else choose("Manage providers", [("Add provider", "")] + [
             (name + ("" if profile["enabled"] else " (disabled)"), name)
             for name, profile in sorted(providers.items())
-        ], searchable=True)
+        ], searchable=len(providers) > 8)
+        add_first = False
         if name is None:
             return
         try:
             if not name:
-                name = input("Provider name (letters, numbers, hyphens): ").strip().lower()
+                name = input("Provider name: ").strip().lower()
                 if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name) or name in providers or name == "native":
                     raise ValueError("Choose a unique provider name using letters, digits, or hyphens.")
                 updated = edit({})
@@ -239,9 +266,10 @@ def manage():
                     continue
             save(CONFIG, providers)
             cached = load(CACHE)
-            if name in cached:
-                del cached[name]
-                save(CACHE, cached)
+            remaining = {key: models for key, models in cached.items()
+                         if key not in (name, f"{name}:claude", f"{name}:codex")}
+            if remaining != cached:
+                save(CACHE, remaining)
             print("Provider settings saved.")
         except (OSError, ValueError) as error:
             print(f"Could not save provider: {error}")
@@ -254,15 +282,16 @@ def select_provider(harness, providers):
     return choose(f"Select a provider for {harness} (choose models in /model)", options, searchable=True)
 
 
-def provider_models(name, profile):
+def provider_models(name, profile, harness):
     cache = load(CACHE)
+    cache_key = f"{name}:{harness}"
     try:
-        live = read_catalog(profile)
+        live = read_catalog(profile, harness)
         if live:
-            cache[name] = live
+            cache[cache_key] = live
             save(CACHE, cache)
     except (OSError, ValueError) as error:
-        live = cache.get(name, [])
+        live = cache.get(cache_key, [])
         fallback = " Using last successful catalog." if live else ""
         print(f"{name}: catalog unavailable ({error}).{fallback}", file=sys.stderr)
     return sorted(set(live) | set(profile["manual"]))
@@ -293,7 +322,7 @@ def launch(harness, name, model, providers, passthrough):
         if not profile or not profile["enabled"] or not profile[harness]:
             raise ValueError(f"Provider {name!r} has no enabled {harness} route.")
         base = profile["base"] if profile[harness] == "=" else profile[harness]
-        models = provider_models(name, profile)
+        models = provider_models(name, profile, harness)
         model = model or profile.get("default_model") or next(iter(models), None)
         if not model:
             raise ValueError("No models found. Check the provider catalog or supply --model MODEL_ID.")
@@ -385,7 +414,7 @@ def import_local_claude(directory):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, epilog="Run without arguments for the menu. Put harness arguments after --.")
-    parser.add_argument("mode", nargs="?", choices=(*COMMANDS, "providers", "import-local-claude", "help"))
+    parser.add_argument("mode", nargs="?", choices=(*COMMANDS, "add", "providers", "import-local-claude", "help"))
     parser.add_argument("--directory", type=Path, help="Legacy provider directory for import-local-claude")
     parser.add_argument("--provider", help="Saved provider name, or native")
     parser.add_argument("--model", help="Exact model ID to launch")
@@ -399,12 +428,12 @@ def main():
         if not mode:
             mode = choose("Provider Picker", [
                 ("Launch Claude Code", "claude"), ("Launch Codex", "codex"),
-                ("Manage providers", "providers"), ("Help", "help"),
+                ("Add provider", "add"), ("Manage providers", "providers"), ("Help", "help"),
             ])
         if mode == "help":
             parser.print_help()
-        elif mode == "providers":
-            manage()
+        elif mode in ("add", "providers"):
+            manage(add_first=mode == "add")
         elif mode == "import-local-claude":
             import_local_claude(args.directory or Path.home() / ".claude-local" / "providers")
         elif mode:
